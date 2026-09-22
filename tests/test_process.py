@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from dev_harness.process import run_process
+from claude_harness.process import run_process
 
 
 def _pid_exists(pid: int) -> bool:
@@ -62,7 +62,7 @@ def test_timeout_terminates_descendant_process(tmp_path: Path) -> None:
 def test_job_assignment_failure_happens_before_process_can_spawn_descendant(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import dev_harness.process as process_module
+    import claude_harness.process as process_module
 
     pid_file = tmp_path / "child.pid"
     script = tmp_path / "parent.py"

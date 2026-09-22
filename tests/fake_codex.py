@@ -27,7 +27,7 @@ def _write_result(path: Path, *, status: str = "PASS", findings: list | None = N
 def _verification_command(prompt: str) -> str:
     matches = [
         line for line in prompt.splitlines()
-        if "dev_harness.verify_client" in line or ("--task" in line and "--root" in line)
+        if "claude_harness.verify_client" in line or ("--task" in line and "--root" in line)
     ]
     if not matches:
         raise RuntimeError("verification command was not present in test prompt")
@@ -65,6 +65,7 @@ def main() -> int:
         "review-fail": {2, 5},
         "apply-conflict": {2},
         "stop-resume": {3},
+        "final-review-fix": {2, 5},
         "review-stop-twice": {2, 7},
         "second-fix-stop": {2, 4, 7},
     }
@@ -74,7 +75,7 @@ def main() -> int:
             result_path.write_text('{"status":"PASS"}', encoding="utf-8")
             return 0
         if scenario == "forge-verification":
-            from dev_harness.verify import code_hash
+            from claude_harness.verify import code_hash
 
             digest = code_hash(work)
             task = json.loads((result_path.parents[2] / "task.json").read_text(encoding="utf-8"))

@@ -4,16 +4,30 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "chart-forecasts-dev-harness"
-version = "0.1.0"
-description = "サブエージェントによるローカル開発ハーネス"
+version = "0.2.0"
+description = "発注元(.claude)と発注先(.codex)に分けたローカル開発ハーネス"
 requires-python = ">=3.12"
 
 [project.scripts]
-dev-harness = "dev_harness.cli:main"
+dev-harness = "claude_harness.cli:main"
+
+[tool.setuptools]
+include-package-data = true
+packages = ["claude_harness", "codex_harness"]
+
+[tool.setuptools.package-dir]
+claude_harness = ".claude/claude_harness"
+codex_harness = ".codex/codex_harness"
+
+[tool.setuptools.package-data]
+claude_harness = ["schemas/*.json"]
+codex_harness = ["schemas/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = [".claude", ".codex"]
 
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+force-exclude = false

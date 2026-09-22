@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from dev_harness.config import Task, TaskError
+from claude_harness.config import Task, TaskError
 
 
 def write_task(path: Path, **overrides: object) -> Path:

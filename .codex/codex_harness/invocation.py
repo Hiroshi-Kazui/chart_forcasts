@@ -1,22 +1,25 @@
 from __future__ import annotations
 
-import json
 import os
 import shutil
-import sys
 from pathlib import Path
 
-from .process import ProcessResult, run_process
-
+# 工程ごとの担当モデルは発注先の取り決めであり、制御側から差し替えない。
 MODELS = {
     "実装": ("gpt-5.6-sol", "medium"),
     "テスト": ("gpt-5.6-sol", "medium"),
     "レビュー": ("gpt-6-astra", "high"),
     "修正": ("gpt-5.6-sol", "medium"),
 }
+COMMAND_ENV = "DEV_HARNESS_CODEX"
+PROMPT_ENV = "DEV_HARNESS_PROMPT_FILE"
 
 
-def _resolve_codex(command: str) -> list[str]:
+def schema_path(runtime_parent: Path) -> Path:
+    return runtime_parent / "codex_harness" / "schemas" / "phase-result.json"
+
+
+def resolve_codex(command: str) -> list[str]:
     """WindowsのPowerShellラッパーも、シェル展開なしのargvへ解決する。"""
     if os.name != "nt":
         return [command]
@@ -49,21 +52,14 @@ def _resolve_codex(command: str) -> list[str]:
     return [str(resolved)]
 
 
-def invoke(
-    phase: str,
-    prompt: str,
-    work: Path,
-    phase_dir: Path,
-    schema: Path,
-    timeout: int,
-    stop_file: Path,
-) -> tuple[ProcessResult, dict | None]:
-    phase_dir.mkdir(parents=True, exist_ok=False)
-    result_path = phase_dir / "result.json"
-    codex = os.environ.get("DEV_HARNESS_CODEX", "codex")
+def build_argv(
+    phase: str, work: Path, schema: Path, result_path: Path, command: str | None = None
+) -> tuple[list[str], str, str]:
+    """Codex CLIへ渡す固定argvを組み立てる。"""
     model, effort = MODELS[phase]
+    codex = command or os.environ.get(COMMAND_ENV, "codex")
     argv = [
-        *_resolve_codex(codex),
+        *resolve_codex(codex),
         "exec",
         "-C",
         str(work),
@@ -80,44 +76,4 @@ def invoke(
         f'model_reasoning_effort="{effort}"',
         "-",
     ]
-    (phase_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
-    (phase_dir / "invocation.json").write_text(
-        json.dumps(
-            {
-                "argv": argv,
-                "cwd": str(work),
-                "model": model,
-                "reasoning_effort": effort,
-                "timeout": timeout,
-            },
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
-    env = dict(os.environ)
-    env["DEV_HARNESS_PROMPT_FILE"] = str(phase_dir / "prompt.txt")
-    with (
-        (phase_dir / "prompt.txt").open("rb") as inp,
-        (phase_dir / "events.jsonl").open("wb") as out,
-        (phase_dir / "stderr.log").open("wb") as err,
-    ):
-        proc_result = run_process(argv, work, timeout, out, err, stop_file, env, inp)
-    parsed = None
-    if result_path.exists():
-        try:
-            candidate = json.loads(result_path.read_text(encoding="utf-8"))
-            if isinstance(candidate, dict):
-                parsed = candidate
-        except json.JSONDecodeError:
-            pass
-    return proc_result, parsed
-
-
-def frozen_verify_command(runtime: Path, url: str, token: str) -> str:
-    code = (
-        "import sys;sys.path.insert(0,r'"
-        + str(runtime.parent).replace("'", "''")
-        + "');from dev_harness.verify_client import main;raise SystemExit(main())"
-    )
-    return f'"{sys.executable}" -I -c "{code}" --url "{url}" --token "{token}"'
+    return argv, model, effort

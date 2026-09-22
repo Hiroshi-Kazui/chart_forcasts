@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import signal
+import sqlite3
 import subprocess
 import sys
 import time
@@ -13,13 +14,14 @@ import pytest
 
 REPO = Path(__file__).resolve().parents[1]
 TERMINAL = {"COMPLETED", "FAILED", "BLOCKED", "STOPPED"}
+AWAITING = "AWAITING_FINAL_REVIEW"
 
 
 def _env(tmp_path: Path, scenario: str) -> dict[str, str]:
     launcher = tmp_path / "fake-codex.cmd"
     launcher.write_text(f'@"{sys.executable}" "{REPO / "tests" / "fake_codex.py"}" %*\r\n')
     env = dict(os.environ)
-    env["PYTHONPATH"] = str(REPO)
+    env["PYTHONPATH"] = os.pathsep.join([str(REPO / ".claude"), str(REPO / ".codex")])
     env["DEV_HARNESS_CODEX"] = str(launcher)
     env["DEV_HARNESS_TEST_SCENARIO"] = scenario
     return env
@@ -67,7 +69,7 @@ def _cli(project: Path, env: dict[str, str], *args: str) -> subprocess.Completed
         startupinfo.wShowWindow = subprocess.SW_HIDE
         creationflags = subprocess.CREATE_NO_WINDOW
     return subprocess.run(
-        [sys.executable, "-m", "dev_harness", *args],
+        [sys.executable, "-m", "claude_harness", *args],
         cwd=project,
         env=env,
         capture_output=True,
@@ -78,6 +80,69 @@ def _cli(project: Path, env: dict[str, str], *args: str) -> subprocess.Completed
     )
 
 
+def _write_verdict(
+    project: Path,
+    run_id: str,
+    *,
+    status: str = "PASS",
+    findings: list[dict] | None = None,
+    model: str = "claude-fable-5-1",
+    name: str = "verdict.json",
+) -> Path:
+    run_dir = project / ".harness" / "runs" / run_id
+    path = run_dir / name
+    path.write_text(
+        json.dumps(
+            {
+                "status": status,
+                "summary": "最終レビュー判定",
+                "findings": findings if findings is not None else [],
+                "reviewer": {"model": model, "session": "pytest"},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def _finding(project: Path, run_id: str, severity: str = "P1") -> dict:
+    run_dir = project / ".harness" / "runs" / run_id
+    return {
+        "id": "F1",
+        "severity": severity,
+        "description": "最終レビューの必須指摘",
+        "evidence": str(run_dir / "final-review-request.json"),
+    }
+
+
+def _settle(
+    project: Path,
+    env: dict[str, str],
+    run_id: str,
+    *,
+    timeout: float = 45,
+    verdict: str = "PASS",
+    findings: list[dict] | None = None,
+) -> dict:
+    """最終レビュー待ちになったら判定を提出しつつ、終端状態まで進める。"""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        status = _cli(project, env, "status", "--run", run_id, "--json")
+        assert status.returncode == 0, status.stderr
+        record = json.loads(status.stdout)
+        if record["status"] == AWAITING:
+            path = _write_verdict(project, run_id, status=verdict, findings=findings)
+            submitted = _cli(project, env, "final-review", "--run", run_id, "--file", str(path))
+            assert submitted.returncode == 0, submitted.stderr
+            verdict, findings = "PASS", None
+            continue
+        if record["status"] in TERMINAL:
+            return record
+        time.sleep(0.2)
+    pytest.fail(f"run {run_id} did not terminate within {timeout} seconds")
+
+
 def _run_to_terminal(
     project: Path, scenario: str, *, max_fixes: int = 2
 ) -> tuple[str, dict, dict[str, str]]:
@@ -85,15 +150,7 @@ def _run_to_terminal(
     launched = _cli(project, env, "run", "--task", str(_task(project, max_fixes=max_fixes)))
     assert launched.returncode == 0, launched.stderr
     run_id = launched.stdout.strip()
-    deadline = time.monotonic() + 45
-    while time.monotonic() < deadline:
-        status = _cli(project, env, "status", "--run", run_id, "--json")
-        assert status.returncode == 0, status.stderr
-        record = json.loads(status.stdout)
-        if record["status"] in TERMINAL:
-            return run_id, record, env
-        time.sleep(0.2)
-    pytest.fail(f"run {run_id} did not terminate within 45 seconds")
+    return run_id, _settle(project, env, run_id), env
 
 
 def test_normal_run_uses_fixed_models_and_applies_only_after_test_and_review(
@@ -180,12 +237,7 @@ def test_stop_then_resume_preserves_run_and_completes(tmp_path: Path) -> None:
     created = status["created"]
     resumed = _cli(tmp_path, env, "resume", "--run", run_id)
     assert resumed.returncode == 0, resumed.stderr
-    deadline = time.monotonic() + 30
-    while time.monotonic() < deadline:
-        status = json.loads(_cli(tmp_path, env, "status", "--run", run_id, "--json").stdout)
-        if status["status"] in TERMINAL:
-            break
-        time.sleep(0.2)
+    status = _settle(tmp_path, env, run_id, timeout=30)
     assert status["status"] == "COMPLETED", status
     assert status["created"] == created
     assert status["fix_count"] == 0
@@ -262,12 +314,7 @@ def test_repeated_resume_deducts_same_phase_budget_and_preserves_review_context(
         assert status["status"] == "STOPPED", status
         assert _cli(tmp_path, env, "resume", "--run", run_id).returncode == 0
 
-    deadline = time.monotonic() + 30
-    while time.monotonic() < deadline:
-        status = json.loads(_cli(tmp_path, env, "status", "--run", run_id, "--json").stdout)
-        if status["status"] in TERMINAL:
-            break
-        time.sleep(0.2)
+    status = _settle(tmp_path, env, run_id, timeout=30)
     assert status["status"] == "COMPLETED", status
 
     fix_invocations = [
@@ -319,12 +366,7 @@ def test_second_fix_stopped_mid_phase_can_resume(tmp_path: Path) -> None:
     assert status["status"] == "STOPPED", status
     assert status["fix_count"] == 2
     assert _cli(tmp_path, env, "resume", "--run", run_id).returncode == 0
-    deadline = time.monotonic() + 30
-    while time.monotonic() < deadline:
-        status = json.loads(_cli(tmp_path, env, "status", "--run", run_id, "--json").stdout)
-        if status["status"] in TERMINAL:
-            break
-        time.sleep(0.2)
+    status = _settle(tmp_path, env, run_id, timeout=30)
     assert status["status"] == "COMPLETED", status
 
 
@@ -380,11 +422,168 @@ def test_stop_after_review_before_apply_can_resume_safely(tmp_path: Path) -> Non
     assert (tmp_path / "src" / "app.txt").read_text(encoding="utf-8") == "old\n"
     resumed = _cli(tmp_path, env, "resume", "--run", run_id)
     assert resumed.returncode == 0, resumed.stderr
-    deadline = time.monotonic() + 20
-    while time.monotonic() < deadline:
-        status = json.loads(_cli(tmp_path, env, "status", "--run", run_id, "--json").stdout)
-        if status["status"] in TERMINAL:
-            break
-        time.sleep(0.2)
+    status = _settle(tmp_path, env, run_id, timeout=20)
     assert status["status"] == "COMPLETED", status
     assert (tmp_path / "src" / "app.txt").read_text(encoding="utf-8") == "ok\n"
+
+
+def _launch(project: Path, scenario: str, *, max_fixes: int = 2) -> tuple[str, dict[str, str]]:
+    env = _env(project, scenario)
+    launched = _cli(project, env, "run", "--task", str(_task(project, max_fixes=max_fixes)))
+    assert launched.returncode == 0, launched.stderr
+    return launched.stdout.strip(), env
+
+
+def _await_final_review(
+    project: Path, env: dict[str, str], run_id: str, *, timeout: float = 30
+) -> dict:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        record = json.loads(_cli(project, env, "status", "--run", run_id, "--json").stdout)
+        if record["status"] == AWAITING:
+            return record
+        assert record["status"] not in TERMINAL, record
+        time.sleep(0.2)
+    pytest.fail(f"run {run_id} did not reach final review within {timeout} seconds")
+
+
+def _excluded_seconds(project: Path, run_id: str) -> float:
+    with sqlite3.connect(project / ".harness" / "state.sqlite3") as db:
+        row = db.execute("SELECT excluded_seconds FROM runs WHERE id=?", (run_id,)).fetchone()
+    return float(row[0])
+
+
+def test_astra_pass_stops_for_claude_final_review_before_applying(tmp_path: Path) -> None:
+    run_id, env = _launch(tmp_path, "normal")
+    record = _await_final_review(tmp_path, env, run_id)
+    assert record["phase"] == "最終レビュー"
+    assert record["controller_pid"] is None
+    assert (tmp_path / "src" / "app.txt").read_text(encoding="utf-8") == "old\n"
+
+    run_dir = tmp_path / ".harness" / "runs" / run_id
+    request = json.loads((run_dir / "final-review-request.json").read_text(encoding="utf-8"))
+    assert request["changed_files"] == ["src/app.txt"]
+    assert request["tested_code_hash"] == (run_dir / "tested-code-hash.txt").read_text(
+        encoding="ascii"
+    )
+    assert request["work_root"] == str(run_dir / "work")
+    assert len(request["phases"]) == 3
+
+
+def test_wait_returns_when_claude_has_to_decide(tmp_path: Path) -> None:
+    run_id, env = _launch(tmp_path, "normal")
+    waited = _cli(tmp_path, env, "wait", "--run", run_id, "--json", "--timeout", "8")
+    assert waited.returncode == 0, waited.stderr
+    assert json.loads(waited.stdout)["status"] == AWAITING
+
+
+def test_final_review_pass_applies_changes_and_records_verdict(tmp_path: Path) -> None:
+    run_id, env = _launch(tmp_path, "normal")
+    _await_final_review(tmp_path, env, run_id)
+    path = _write_verdict(tmp_path, run_id)
+    assert _cli(tmp_path, env, "final-review", "--run", run_id, "--file", str(path)).returncode == 0
+    status = _settle(tmp_path, env, run_id, timeout=20)
+    assert status["status"] == "COMPLETED", status
+    assert (tmp_path / "src" / "app.txt").read_text(encoding="utf-8") == "ok\n"
+
+    run_dir = tmp_path / ".harness" / "runs" / run_id
+    assert json.loads((run_dir / "changes.json").read_text(encoding="utf-8")) == ["src/app.txt"]
+    verdict = json.loads((run_dir / "final-review.json").read_text(encoding="utf-8"))
+    assert verdict["reviewer"]["model"] == "claude-fable-5-1"
+    decisions = (run_dir / "control-decisions.jsonl").read_text(encoding="utf-8").splitlines()
+    assert any(json.loads(line)["phase"] == "最終レビュー" for line in decisions)
+
+
+@pytest.mark.parametrize("mutate", ["schema", "model", "evidence", "pass-with-blocking"])
+def test_final_review_rejects_untrustworthy_verdict(tmp_path: Path, mutate: str) -> None:
+    run_id, env = _launch(tmp_path, "normal")
+    _await_final_review(tmp_path, env, run_id)
+    run_dir = tmp_path / ".harness" / "runs" / run_id
+    path = run_dir / "bad-verdict.json"
+    if mutate == "schema":
+        path.write_text(json.dumps({"status": "PASS"}), encoding="utf-8")
+    elif mutate == "model":
+        path = _write_verdict(tmp_path, run_id, model="gpt-6-astra", name="bad-verdict.json")
+    elif mutate == "evidence":
+        outside = dict(_finding(tmp_path, run_id))
+        outside["evidence"] = str(tmp_path / "src" / "app.txt")
+        path = _write_verdict(
+            tmp_path, run_id, status="FAIL", findings=[outside], name="bad-verdict.json"
+        )
+    else:
+        path = _write_verdict(
+            tmp_path,
+            run_id,
+            status="PASS",
+            findings=[_finding(tmp_path, run_id)],
+            name="bad-verdict.json",
+        )
+    rejected = _cli(tmp_path, env, "final-review", "--run", run_id, "--file", str(path))
+    assert rejected.returncode == 2, rejected.stdout
+    after = json.loads(_cli(tmp_path, env, "status", "--run", run_id, "--json").stdout)
+    assert after["status"] == AWAITING
+    assert not (run_dir / "final-review.json").exists()
+    assert (tmp_path / "src" / "app.txt").read_text(encoding="utf-8") == "old\n"
+
+
+def test_final_review_rejects_verdict_when_work_copy_changed(tmp_path: Path) -> None:
+    run_id, env = _launch(tmp_path, "normal")
+    _await_final_review(tmp_path, env, run_id)
+    run_dir = tmp_path / ".harness" / "runs" / run_id
+    (run_dir / "work" / "src" / "app.txt").write_text("tampered\n", encoding="utf-8")
+    path = _write_verdict(tmp_path, run_id)
+    rejected = _cli(tmp_path, env, "final-review", "--run", run_id, "--file", str(path))
+    assert rejected.returncode == 2
+    assert "テスト時から変更" in rejected.stderr
+    assert (tmp_path / "src" / "app.txt").read_text(encoding="utf-8") == "old\n"
+
+
+def test_final_review_findings_send_run_back_to_fix_and_retest(tmp_path: Path) -> None:
+    run_id, env = _launch(tmp_path, "final-review-fix")
+    _await_final_review(tmp_path, env, run_id)
+    path = _write_verdict(tmp_path, run_id, status="FAIL", findings=[_finding(tmp_path, run_id)])
+    assert _cli(tmp_path, env, "final-review", "--run", run_id, "--file", str(path)).returncode == 0
+    second = _await_final_review(tmp_path, env, run_id, timeout=40)
+    assert second["fix_count"] == 1
+    phases = tmp_path / ".harness" / "runs" / run_id / "phases"
+    assert sorted(p.name.split("-", 1)[1] for p in phases.glob("0[456]-*")) == [
+        "テスト",
+        "レビュー",
+        "修正",
+    ]
+    fix_prompt = next(phases.glob("04-*/prompt.txt")).read_text(encoding="utf-8")
+    assert "最終レビューの必須指摘" in fix_prompt
+    status = _settle(tmp_path, env, run_id, timeout=25)
+    assert status["status"] == "COMPLETED", status
+
+
+def test_final_review_failure_at_fix_limit_stops_the_run(tmp_path: Path) -> None:
+    run_id, env = _launch(tmp_path, "normal", max_fixes=0)
+    _await_final_review(tmp_path, env, run_id)
+    path = _write_verdict(tmp_path, run_id, status="FAIL", findings=[_finding(tmp_path, run_id)])
+    refused = _cli(tmp_path, env, "final-review", "--run", run_id, "--file", str(path))
+    assert refused.returncode == 1
+    record = json.loads(_cli(tmp_path, env, "status", "--run", run_id, "--json").stdout)
+    assert record["status"] == "FAILED"
+    assert (tmp_path / "src" / "app.txt").read_text(encoding="utf-8") == "old\n"
+
+
+def test_resume_is_refused_while_final_review_is_pending(tmp_path: Path) -> None:
+    run_id, env = _launch(tmp_path, "normal")
+    _await_final_review(tmp_path, env, run_id)
+    refused = _cli(tmp_path, env, "resume", "--run", run_id)
+    assert refused.returncode == 2
+    assert "final-review" in refused.stderr
+    after = json.loads(_cli(tmp_path, env, "status", "--run", run_id, "--json").stdout)
+    assert after["status"] == AWAITING
+
+
+def test_final_review_waiting_time_is_not_charged_to_the_run_budget(tmp_path: Path) -> None:
+    run_id, env = _launch(tmp_path, "normal")
+    _await_final_review(tmp_path, env, run_id)
+    assert _excluded_seconds(tmp_path, run_id) == 0.0
+    time.sleep(2.0)
+    path = _write_verdict(tmp_path, run_id)
+    assert _cli(tmp_path, env, "final-review", "--run", run_id, "--file", str(path)).returncode == 0
+    assert _excluded_seconds(tmp_path, run_id) >= 2.0
+    assert _settle(tmp_path, env, run_id, timeout=20)["status"] == "COMPLETED"

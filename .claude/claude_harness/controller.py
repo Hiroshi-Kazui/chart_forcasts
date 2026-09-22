@@ -8,8 +8,12 @@ import time
 import traceback
 from pathlib import Path
 
-from .agent import frozen_verify_command, invoke
+from codex_harness.invocation import schema_path
+from codex_harness.prompts import build_prompt
+
+from .agent_runner import frozen_verify_command, invoke
 from .config import Task
+from .final_review import AWAITING, blocking_findings, check_verdict
 from .liveness import close_marker, create_marker
 from .store import Store
 from .verify import code_hash
@@ -17,57 +21,6 @@ from .verification_broker import VerificationBroker
 from .workspace import apply_changes, make_copy, snapshot_hashes, write_baseline
 
 PHASES = {"実装": "implementation", "テスト": "testing", "レビュー": "review", "修正": "fix"}
-
-
-def _task_text(task: Task) -> str:
-    return json.dumps(
-        {
-            "name": task.name,
-            "requirements": task.requirements,
-            "requirement_files": task.requirement_files,
-            "edit_scope": task.edit_scope,
-            "acceptance_criteria": task.acceptance_criteria,
-            "verification_commands": task.verification_commands,
-        },
-        ensure_ascii=False,
-        indent=2,
-    )
-
-
-def _prompt(
-    phase: str,
-    task: Task,
-    context: list[dict],
-    verify_command: str | None,
-    frozen_requirements: dict[str, str],
-) -> str:
-    common = (
-        f"あなたは独立した{phase}担当です。説明も最終JSONも日本語で記述してください。\n"
-        f"タスク定義:\n{_task_text(task)}\n開始時に固定した要件原文:\n"
-        f"{json.dumps(frozen_requirements, ensure_ascii=False, indent=2)}\n"
-        "最終応答は指定JSON Schemaに厳密に従ってください。\n"
-        "要件、受入条件、必要入力に不明点や矛盾があれば推測で補わず、statusをBLOCKEDにして"
-        "不足内容をissuesへ記録してください。\n"
-        "GUIや新しいコンソールを開かないでください。Windowsで補助プロセスを起動する場合は"
-        "CREATE_NO_WINDOWとSW_HIDE、またはStart-Process -WindowStyle Hiddenを必ず指定してください。\n"
-    )
-    if phase == "実装":
-        return common + "編集範囲内で要件と初期テストを実装してください。commitとpushは禁止です。"
-    if phase == "修正":
-        return (
-            common
-            + "次の指摘だけを修正してください。commitとpushは禁止です。\n"
-            + json.dumps(context, ensure_ascii=False)
-        )
-    if phase == "テスト":
-        return common + (
-            "製品コードとテストコードを変更せず独立に検査してください。次の固定コマンドを一度実行し、"
-            f"結果を保存してください。\n{verify_command}\n全件成功した場合だけPASSにしてください。"
-        )
-    return common + (
-        "製品コードとテストコードを変更せず要件、差分、テスト証跡を照合してください。"
-        "P0からP2は修正必須、P3は助言です。証跡: " + json.dumps(context, ensure_ascii=False)
-    )
 
 
 def _valid_result(value: dict | None) -> bool:
@@ -113,7 +66,7 @@ def _integrity(runtime_parent: Path, task_path: Path, requirements_path: Path) -
 
 def _verifier_called(phase_dir: Path) -> bool:
     events = (phase_dir / "events.jsonl").read_text(encoding="utf-8", errors="replace")
-    return "dev_harness.verify_client" in events
+    return "claude_harness.verify_client" in events
 
 
 def _outside(base: dict[str, str], after: dict[str, str], allowed: tuple[str, ...]) -> list[str]:
@@ -132,14 +85,79 @@ def _append_decision(path: Path, value: dict) -> None:
         stream.write(json.dumps({"time": time.time(), **value}, ensure_ascii=False) + "\n")
 
 
+def write_progress(path: Path, phase: str, context: list[dict], spent: float, **extra) -> None:
+    path.write_text(
+        json.dumps(
+            {"phase": phase, "context": context, "spent": spent, "started_at": None, **extra},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+
+def _final_review_request(
+    run_id: str, task: Task, root: Path, work: Path, run_dir: Path, changed: list[str]
+) -> dict:
+    return {
+        "run_id": run_id,
+        "task_name": task.name,
+        "requirements": list(task.requirements),
+        "acceptance_criteria": list(task.acceptance_criteria),
+        "edit_scope": list(task.edit_scope),
+        "original_root": str(root),
+        "work_root": str(work),
+        "baseline": str(run_dir / "baseline.json"),
+        "frozen_requirements": str(run_dir / "frozen-requirements.json"),
+        "tested_code_hash": (run_dir / "tested-code-hash.txt").read_text(encoding="ascii"),
+        "changed_files": changed,
+        "phases": sorted(str(p) for p in (run_dir / "phases").glob("*")),
+        "control_history": str(run_dir / "control-decisions.jsonl"),
+        "verdict_schema": str(run_dir / "runtime" / "claude_harness" / "schemas" / "final-review.json"),
+        "submit_command": [
+            "python",
+            "-m",
+            "claude_harness",
+            "final-review",
+            "--run",
+            run_id,
+            "--file",
+            "<判定JSONのパス>",
+        ],
+    }
+
+
+def _complete(
+    store: Store,
+    run_id: str,
+    root: Path,
+    work: Path,
+    baseline: dict[str, str],
+    task: Task,
+    run_dir: Path,
+) -> int:
+    changes = apply_changes(root, work, baseline, task.edit_scope, task.exclude)
+    (run_dir / "changes.json").write_text(json.dumps(changes, ensure_ascii=False), encoding="utf-8")
+    (run_dir / "report.md").write_text(
+        f"# 開発ハーネス実行結果\n\n状態: 完了\n\nタスク: {task.name}\n\n"
+        f"反映: {', '.join(changes) or 'なし'}\n",
+        encoding="utf-8",
+    )
+    store.update(
+        run_id,
+        status="COMPLETED",
+        phase="終了",
+        message="テスト、レビュー、最終レビューに合格しました",
+    )
+    return 0
+
+
 def run_controller(root: Path, run_id: str) -> int:
     marker = create_marker(run_id)
     store, run_dir = Store(root), root / ".harness" / "runs" / run_id
     row = store.get(run_id)
     stop_file, task_path = run_dir / "STOP", run_dir / "task.json"
     runtime_parent, work = run_dir / "runtime", run_dir / "work"
-    runtime = runtime_parent / "dev_harness"
-    schema, baseline_path = runtime / "schemas" / "phase-result.json", run_dir / "baseline.json"
+    schema, baseline_path = schema_path(runtime_parent), run_dir / "baseline.json"
     integrity_path, task = run_dir / "integrity.json", Task.load(task_path)
     frozen_requirements_path = run_dir / "frozen-requirements.json"
     if not frozen_requirements_path.exists():
@@ -187,11 +205,44 @@ def run_controller(root: Path, run_id: str) -> int:
             phase = str(row["phase"]) if row["phase"] in PHASES else "実装"
             context: list[dict] = []
             resume_spent = 0.0
+        # 最終レビュー待ちの時間は担当の持ち時間ではないため、全体予算から除く。
+        excluded = float(row["excluded_seconds"])
+        if phase == "反映":
+            verdict_path = run_dir / "final-review.json"
+            verdict = json.loads(verdict_path.read_text(encoding="utf-8"))
+            problems = check_verdict(
+                verdict, run_dir, root, work, run_dir / "tested-code-hash.txt"
+            )
+            if verdict.get("status") != "PASS" or blocking_findings(verdict):
+                problems.append("最終レビューが合格していません")
+            if problems:
+                store.update(
+                    run_id, status="FAILED", phase="最終レビュー", message="; ".join(problems)
+                )
+                return 1
+            if stop_file.exists():
+                write_progress(progress_path, "反映", context, 0.0)
+                store.update(
+                    run_id, status="STOPPED", phase="反映", message="停止指示を受けました"
+                )
+                return 2
+            if time.time() - created - excluded >= task.timeouts.total:
+                store.update(
+                    run_id, status="FAILED", phase="終了", message="全体時間上限を超過しました"
+                )
+                return 1
+            if _integrity(runtime_parent, task_path, frozen_requirements_path) != expected_integrity:
+                raise RuntimeError("固定した実行環境またはタスク定義が変更されました")
+            _append_decision(
+                decisions_path,
+                {"phase": "最終レビュー", "decision": "PASS", "evidence": str(verdict_path)},
+            )
+            return _complete(store, run_id, root, work, baseline, task, run_dir)
         while True:
             if stop_file.exists():
                 store.update(run_id, status="STOPPED", phase=phase, message="停止指示を受けました")
                 return 2
-            elapsed = time.time() - created
+            elapsed = time.time() - created - excluded
             if elapsed >= task.timeouts.total:
                 store.update(
                     run_id, status="FAILED", phase=phase, message="全体時間上限を超過しました"
@@ -238,13 +289,13 @@ def run_controller(root: Path, run_id: str) -> int:
             if broker:
                 broker.start()
             verify_cmd = (
-                frozen_verify_command(runtime, broker.url, broker.token) if broker else None
+                frozen_verify_command(runtime_parent, broker.url, broker.token) if broker else None
             )
             store.update(run_id, phase=phase, message=f"{phase}担当を実行中")
             try:
                 proc, result = invoke(
                     phase,
-                    _prompt(phase, task, context, verify_cmd, frozen_requirements),
+                    build_prompt(phase, task, context, verify_cmd, frozen_requirements),
                     work,
                     phase_dir,
                     schema,
@@ -417,49 +468,46 @@ def run_controller(root: Path, run_id: str) -> int:
                     work
                 )
                 if result["status"] == "PASS" and not mandatory and same:
-                    if stop_file.exists() or time.time() - created >= task.timeouts.total:
+                    if stop_file.exists() or time.time() - created - excluded >= task.timeouts.total:
                         status = "STOPPED" if stop_file.exists() else "FAILED"
                         final_phase = "レビュー" if status == "STOPPED" else "終了"
                         if status == "STOPPED":
-                            progress_path.write_text(
-                                json.dumps(
-                                    {
-                                        "phase": "レビュー",
-                                        "context": context,
-                                        "spent": prior_spent + proc.duration,
-                                        "started_at": None,
-                                    },
-                                    ensure_ascii=False,
-                                ),
-                                encoding="utf-8",
+                            write_progress(
+                                progress_path, "レビュー", context, prior_spent + proc.duration
                             )
                         store.update(
                             run_id,
                             status=status,
                             phase=final_phase,
-                            message="反映前に停止または期限へ到達しました",
+                            message="最終レビュー前に停止または期限へ到達しました",
                         )
                         return 2 if status == "STOPPED" else 1
-                    if (
-                        _integrity(runtime_parent, task_path, frozen_requirements_path)
-                        != expected_integrity
-                    ):
-                        raise RuntimeError("固定した実行環境またはタスク定義が変更されました")
-                    changes = apply_changes(root, work, baseline, task.edit_scope, task.exclude)
-                    (run_dir / "changes.json").write_text(
-                        json.dumps(changes, ensure_ascii=False), encoding="utf-8"
+                    # ここからは制御プロセスを終えてClaudeの最終レビューを待つ。
+                    changed = sorted(
+                        p for p in set(baseline) | set(after) if baseline.get(p) != after.get(p)
                     )
-                    (run_dir / "report.md").write_text(
-                        f"# 開発ハーネス実行結果\n\n状態: 完了\n\nタスク: {task.name}\n\n反映: {', '.join(changes) or 'なし'}\n",
+                    (run_dir / "final-review-request.json").write_text(
+                        json.dumps(
+                            _final_review_request(run_id, task, root, work, run_dir, changed),
+                            ensure_ascii=False,
+                            indent=2,
+                        ),
                         encoding="utf-8",
+                    )
+                    write_progress(
+                        progress_path, "最終レビュー", context, 0.0, awaiting_since=time.time()
+                    )
+                    _append_decision(
+                        decisions_path,
+                        {"phase": "レビュー", "decision": "PASS", "next": "最終レビュー待ち"},
                     )
                     store.update(
                         run_id,
-                        status="COMPLETED",
-                        phase="終了",
-                        message="テストとレビューに合格しました",
+                        status=AWAITING,
+                        phase="最終レビュー",
+                        message="Claudeの最終レビュー待ちです",
                     )
-                    return 0
+                    return 4
                 context = mandatory or [
                     {"source": "レビュー", "description": x} for x in result["issues"]
                 ]

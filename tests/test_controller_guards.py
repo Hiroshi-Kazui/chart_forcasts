@@ -1,9 +1,10 @@
 import json
 from pathlib import Path
 
-from dev_harness.config import Task
-from dev_harness.controller import _prompt, _valid_result, _verification_valid
-from dev_harness.verify import code_hash
+from claude_harness.config import Task
+from claude_harness.controller import _valid_result, _verification_valid
+from claude_harness.verify import code_hash
+from codex_harness.prompts import build_prompt
 
 
 def task() -> Task:
@@ -62,6 +63,6 @@ def test_phase_result_validation_is_fail_closed() -> None:
 
 def test_every_phase_prompt_requires_blocked_instead_of_guessing() -> None:
     for phase in ("実装", "テスト", "修正", "レビュー"):
-        prompt = _prompt(phase, task(), [], "verify-command", {})
+        prompt = build_prompt(phase, task(), [], "verify-command", {})
         assert "不明点や矛盾" in prompt
         assert "BLOCKED" in prompt

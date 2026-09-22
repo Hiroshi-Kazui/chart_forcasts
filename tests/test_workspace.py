@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from dev_harness.workspace import apply_changes, make_copy, snapshot_hashes
+from claude_harness.workspace import apply_changes, make_copy, snapshot_hashes
 
 
 def test_make_copy_preserves_uncommitted_source_and_omits_runtime_state(tmp_path: Path) -> None:

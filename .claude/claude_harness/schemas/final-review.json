@@ -1,0 +1,32 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["status", "summary", "findings", "reviewer"],
+  "properties": {
+    "status": {"enum": ["PASS", "FAIL"]},
+    "summary": {"type": "string", "minLength": 1},
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "severity", "description", "evidence"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "severity": {"enum": ["P0", "P1", "P2", "P3"]},
+          "description": {"type": "string", "minLength": 1},
+          "evidence": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "reviewer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model"],
+      "properties": {
+        "model": {"const": "claude-fable-5-1"},
+        "session": {"type": "string"}
+      }
+    }
+  }
+}

@@ -11,10 +11,12 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
  id TEXT PRIMARY KEY, task_path TEXT NOT NULL, status TEXT NOT NULL,
  phase TEXT NOT NULL, controller_pid INTEGER, created REAL NOT NULL,
- updated REAL NOT NULL, message TEXT NOT NULL DEFAULT '', fix_count INTEGER NOT NULL DEFAULT 0
+ updated REAL NOT NULL, message TEXT NOT NULL DEFAULT '', fix_count INTEGER NOT NULL DEFAULT 0,
+ excluded_seconds REAL NOT NULL DEFAULT 0
 );
-CREATE UNIQUE INDEX IF NOT EXISTS one_active_task ON runs(task_path)
-WHERE status IN ('QUEUED','RUNNING');
+DROP INDEX IF EXISTS one_active_task;
+CREATE UNIQUE INDEX IF NOT EXISTS one_active_task_v2 ON runs(task_path)
+WHERE status IN ('QUEUED','RUNNING','AWAITING_FINAL_REVIEW');
 """
 
 
@@ -24,6 +26,10 @@ class Store:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as db:
             db.executescript(SCHEMA)
+            # 旧版の台帳には待機除外時間の列が無いため、既存実行を保ったまま補う。
+            columns = {row["name"] for row in db.execute("PRAGMA table_info(runs)")}
+            if "excluded_seconds" not in columns:
+                db.execute("ALTER TABLE runs ADD COLUMN excluded_seconds REAL NOT NULL DEFAULT 0")
 
     def connect(self) -> sqlite3.Connection:
         db = sqlite3.connect(self.path, timeout=10)

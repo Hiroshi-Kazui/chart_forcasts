@@ -1,6 +1,6 @@
 import json
 
-from dev_harness import verify_client
+from claude_harness import verify_client
 
 
 class Response:
