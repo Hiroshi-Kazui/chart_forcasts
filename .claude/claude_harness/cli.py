@@ -116,7 +116,6 @@ def _print_status(row: dict, as_json: bool) -> None:
             "id",
             "status",
             "phase",
-            "fix_count",
             "message",
             "controller_pid",
             "created",
@@ -178,7 +177,6 @@ def command_final_review(args: argparse.Namespace) -> int:
             print(problem, file=sys.stderr)
         return 2
     assert isinstance(verdict, dict)
-    task = Task.load(run_dir / "task.json")
     (run_dir / "final-review.json").write_text(
         json.dumps(verdict, ensure_ascii=False, indent=2), encoding="utf-8"
     )
@@ -201,39 +199,26 @@ def command_final_review(args: argparse.Namespace) -> int:
             )
             + "\n"
         )
-    values: dict = {
-        "status": "QUEUED",
-        "controller_pid": None,
-        "excluded_seconds": excluded,
-    }
-    if verdict["status"] == "PASS" and not blocking:
-        phase, context = "反映", list(progress.get("context", []))
-    else:
-        count = int(row["fix_count"])
-        if count >= task.max_fixes:
-            store.update(
-                args.run,
-                status="FAILED",
-                phase="終了",
-                message="修正回数の上限に達しました",
-                excluded_seconds=excluded,
-            )
-            print("修正回数の上限に達しました", file=sys.stderr)
-            return 1
-        phase = "修正"
-        context = [
-            {
-                "source": "最終レビュー",
-                "description": f"[{x['severity']}] {x['description']}",
-                "evidence": x["evidence"],
-            }
-            for x in (blocking or verdict["findings"])
-        ] or [{"source": "最終レビュー", "description": verdict["summary"]}]
-        values["fix_count"] = count + 1
-    values["phase"] = phase
-    values["message"] = "最終レビューの判定を受理しました"
-    write_progress(progress_path, phase, context, 0.0)
-    if not store.transition(args.run, (AWAITING,), **values):
+    if verdict["status"] != "PASS" or blocking:
+        store.update(
+            args.run,
+            status="FAILED",
+            phase="最終レビュー",
+            message="最終レビューで不合格になりました: " + verdict["summary"],
+            excluded_seconds=excluded,
+        )
+        print("不合格として記録しました。再納品は新しい実行で行ってください", file=sys.stderr)
+        return 1
+    write_progress(progress_path, "反映", 0.0)
+    if not store.transition(
+        args.run,
+        (AWAITING,),
+        status="QUEUED",
+        phase="反映",
+        controller_pid=None,
+        excluded_seconds=excluded,
+        message="最終レビューの判定を受理しました",
+    ):
         print("別の処理が先に状態を変更しました", file=sys.stderr)
         return 2
     try:

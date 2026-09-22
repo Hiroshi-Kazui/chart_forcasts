@@ -14,9 +14,16 @@
     "JQUANTS_API_KEYまたは明示envファイルから認証し、認証情報、取得データ、実行結果をGit管理対象へ入れない",
     "CLIはpython -m chart_forecasts reference --spec specs/reference.jsonとpython -m chart_forecasts verify-referenceを提供する"
   ],
-  "requirement_files": ["docs/roadmap.md"],
+  "requirement_files": [
+    "docs/roadmap.md"
+  ],
   "edit_scope": [
-    "chart_forecasts/**", "specs/**", "tests/**", "pyproject.toml", ".gitignore", "README.md"
+    "chart_forecasts/**",
+    "specs/**",
+    "tests/**",
+    "pyproject.toml",
+    ".gitignore",
+    "README.md"
   ],
   "acceptance_criteria": [
     "正常な実データで有限な推定値と区間を出力する",
@@ -31,16 +38,28 @@
     "verify-referenceは全受入項目に合格した場合だけ終了コード0を返し、統計判定が未確定でも正しい測定が成立すれば検収完了にできる"
   ],
   "verification_commands": [
-    ["python", "-m", "pytest", "-q"],
-    ["python", "-m", "ruff", "check", "."]
+    [
+      "python",
+      "-m",
+      "pytest",
+      "-q"
+    ],
+    [
+      "python",
+      "-m",
+      "ruff",
+      "check",
+      "."
+    ]
   ],
-  "exclude": [".env*", "*.sqlite", "*.parquet"],
+  "exclude": [
+    ".env*",
+    "*.sqlite",
+    "*.parquet"
+  ],
   "timeouts": {
-    "implementation": 3600,
-    "testing": 1800,
-    "review": 1800,
-    "fix": 2700,
+    "delivery": 14400,
+    "verification": 1800,
     "total": 14400
-  },
-  "max_fixes": 2
+  }
 }

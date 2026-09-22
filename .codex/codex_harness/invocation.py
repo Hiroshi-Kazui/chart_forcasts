@@ -4,19 +4,15 @@ import os
 import shutil
 from pathlib import Path
 
-# 工程ごとの担当モデルは発注先の取り決めであり、制御側から差し替えない。
-MODELS = {
-    "実装": ("gpt-5.6-sol", "medium"),
-    "テスト": ("gpt-5.6-sol", "medium"),
-    "レビュー": ("gpt-6-astra", "high"),
-    "修正": ("gpt-5.6-sol", "medium"),
-}
+# 受注側の設定。どのモデルをどの強度で使い、内部をどう進めるかは受注側が決める。
+MODEL = "gpt-5.6-sol"
+EFFORT = "high"
 COMMAND_ENV = "DEV_HARNESS_CODEX"
 PROMPT_ENV = "DEV_HARNESS_PROMPT_FILE"
 
 
 def schema_path(runtime_parent: Path) -> Path:
-    return runtime_parent / "codex_harness" / "schemas" / "phase-result.json"
+    return runtime_parent / "codex_harness" / "schemas" / "delivery-result.json"
 
 
 def resolve_codex(command: str) -> list[str]:
@@ -53,10 +49,10 @@ def resolve_codex(command: str) -> list[str]:
 
 
 def build_argv(
-    phase: str, work: Path, schema: Path, result_path: Path, command: str | None = None
+    work: Path, schema: Path, result_path: Path, command: str | None = None
 ) -> tuple[list[str], str, str]:
-    """Codex CLIへ渡す固定argvを組み立てる。"""
-    model, effort = MODELS[phase]
+    """Codex CLIへ渡すargvを組み立てる。"""
+    model, effort = MODEL, EFFORT
     codex = command or os.environ.get(COMMAND_ENV, "codex")
     argv = [
         *resolve_codex(codex),

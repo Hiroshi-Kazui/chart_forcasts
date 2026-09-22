@@ -1,0 +1,27 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "status",
+    "summary",
+    "issues"
+  ],
+  "properties": {
+    "status": {
+      "enum": [
+        "PASS",
+        "FAIL",
+        "BLOCKED"
+      ]
+    },
+    "summary": {
+      "type": "string"
+    },
+    "issues": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

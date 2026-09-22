@@ -11,8 +11,7 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
  id TEXT PRIMARY KEY, task_path TEXT NOT NULL, status TEXT NOT NULL,
  phase TEXT NOT NULL, controller_pid INTEGER, created REAL NOT NULL,
- updated REAL NOT NULL, message TEXT NOT NULL DEFAULT '', fix_count INTEGER NOT NULL DEFAULT 0,
- excluded_seconds REAL NOT NULL DEFAULT 0
+ updated REAL NOT NULL, message TEXT NOT NULL DEFAULT '', excluded_seconds REAL NOT NULL DEFAULT 0
 );
 DROP INDEX IF EXISTS one_active_task;
 CREATE UNIQUE INDEX IF NOT EXISTS one_active_task_v2 ON runs(task_path)

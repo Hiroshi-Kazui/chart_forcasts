@@ -1,9 +1,7 @@
-import json
 from pathlib import Path
 
 from claude_harness.config import Task
-from claude_harness.controller import _valid_result, _verification_valid
-from claude_harness.verify import code_hash
+from claude_harness.controller import _outside, _valid_result
 from codex_harness.prompts import build_prompt
 
 
@@ -17,52 +15,28 @@ def task() -> Task:
     )
 
 
-def evidence(root: Path) -> dict:
-    return {
-        "code_hash": code_hash(root),
-        "end_code_hash": code_hash(root),
-        "commands": [
-            {
-                "argv": ["python", "check.py"],
-                "exit_code": 0,
-                "timed_out": False,
-                "stdout": "ok",
-                "stderr": "",
-            }
-        ],
-        "success": True,
-    }
-
-
-def test_verification_requires_exact_commands_and_current_code(tmp_path: Path) -> None:
-    (tmp_path / "check.py").write_text("print('ok')", encoding="utf-8")
-    record = evidence(tmp_path)
-    assert _verification_valid(record, task(), tmp_path)
-
-    stale = json.loads(json.dumps(record))
-    (tmp_path / "check.py").write_text("print('changed')", encoding="utf-8")
-    assert not _verification_valid(stale, task(), tmp_path)
-
-    current = evidence(tmp_path)
-    current["commands"][0]["argv"] = ["python", "different.py"]
-    assert not _verification_valid(current, task(), tmp_path)
-
-
-def test_phase_result_validation_is_fail_closed() -> None:
-    valid = {"status": "PASS", "summary": "ok", "issues": [], "review_findings": []}
+def test_delivery_result_validation_is_fail_closed() -> None:
+    valid = {"status": "PASS", "summary": "ok", "issues": []}
     assert _valid_result(valid)
+    assert not _valid_result(None)
     assert not _valid_result({"status": "PASS"})
     assert not _valid_result({**valid, "summary": 1})
-    assert not _valid_result(
-        {
-            **valid,
-            "review_findings": [{"id": "x", "severity": "P9", "description": "bad"}],
-        }
-    )
+    assert not _valid_result({**valid, "status": "DONE"})
+    assert not _valid_result({**valid, "issues": [1]})
 
 
-def test_every_phase_prompt_requires_blocked_instead_of_guessing() -> None:
-    for phase in ("実装", "テスト", "修正", "レビュー"):
-        prompt = build_prompt(phase, task(), [], "verify-command", {})
-        assert "不明点や矛盾" in prompt
-        assert "BLOCKED" in prompt
+def test_changes_outside_edit_scope_are_listed() -> None:
+    base = {"src/a.py": "1", "other.py": "1"}
+    after = {"src/a.py": "2", "other.py": "2"}
+    assert _outside(base, after, ("src",)) == ["other.py"]
+    assert _outside(base, after, ("src", "other.py")) == []
+
+
+def test_order_prompt_leaves_process_to_the_contractor(tmp_path: Path) -> None:
+    prompt = build_prompt(task(), {})
+    assert "受注側の裁量" in prompt
+    assert "不明点や矛盾" in prompt
+    assert "BLOCKED" in prompt
+    assert "edit_scope" in prompt
+    for word in ("実装工程", "テスト担当", "レビュー担当", "修正回数"):
+        assert word not in prompt

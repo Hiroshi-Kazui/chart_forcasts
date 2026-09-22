@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 from pathlib import Path
 
 from codex_harness.invocation import PROMPT_ENV, build_argv
@@ -11,7 +10,6 @@ from .process import ProcessResult, run_process
 
 
 def invoke(
-    phase: str,
     prompt: str,
     work: Path,
     phase_dir: Path,
@@ -21,7 +19,7 @@ def invoke(
 ) -> tuple[ProcessResult, dict | None]:
     phase_dir.mkdir(parents=True, exist_ok=False)
     result_path = phase_dir / "result.json"
-    argv, model, effort = build_argv(phase, work, schema, result_path)
+    argv, model, effort = build_argv(work, schema, result_path)
     (phase_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
     (phase_dir / "invocation.json").write_text(
         json.dumps(
@@ -54,13 +52,3 @@ def invoke(
         except json.JSONDecodeError:
             pass
     return proc_result, parsed
-
-
-def frozen_verify_command(runtime_parent: Path, url: str, token: str) -> str:
-    """テスト担当が一度だけ呼ぶ、制御側の検証実行器への依頼コマンド。"""
-    code = (
-        "import sys;sys.path.insert(0,r'"
-        + str(runtime_parent).replace("'", "''")
-        + "');from claude_harness.verify_client import main;raise SystemExit(main())"
-    )
-    return f'"{sys.executable}" -I -c "{code}" --url "{url}" --token "{token}"'

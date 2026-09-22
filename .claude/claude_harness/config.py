@@ -12,10 +12,8 @@ class TaskError(ValueError):
 
 @dataclass(frozen=True)
 class Timeouts:
-    implementation: int = 3600
-    testing: int = 1800
-    review: int = 1800
-    fix: int = 2700
+    delivery: int = 14400
+    verification: int = 1800
     total: int = 14400
 
 
@@ -29,7 +27,6 @@ class Task:
     requirement_files: tuple[str, ...] = ()
     exclude: tuple[str, ...] = ()
     timeouts: Timeouts = field(default_factory=Timeouts)
-    max_fixes: int = 2
 
     @classmethod
     def load(cls, path: Path) -> "Task":
@@ -44,7 +41,7 @@ class Task:
             "acceptance_criteria",
             "verification_commands",
         )
-        allowed = {*required, "requirement_files", "exclude", "timeouts", "max_fixes"}
+        allowed = {*required, "requirement_files", "exclude", "timeouts"}
         unknown = sorted(set(raw) - allowed)
         if unknown:
             raise TaskError(f"未知の項目があります: {', '.join(unknown)}")
@@ -92,9 +89,6 @@ class Task:
             getattr(timeouts, key) > getattr(limits, key) for key in Timeouts.__dataclass_fields__
         ):
             raise TaskError("時間上限は既定上限を超えられません")
-        max_fixes = int(raw.get("max_fixes", 2))
-        if not 0 <= max_fixes <= 2:
-            raise TaskError("max_fixes は0から2です")
         return cls(
             name=str(raw["name"]),
             requirements=tuple(map(str, raw["requirements"])),
@@ -104,5 +98,4 @@ class Task:
             requirement_files=tuple(map(str, raw.get("requirement_files", []))),
             exclude=tuple(map(str, raw.get("exclude", []))),
             timeouts=timeouts,
-            max_fixes=max_fixes,
         )

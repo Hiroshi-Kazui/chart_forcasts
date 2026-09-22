@@ -20,37 +20,23 @@ def task_text(task: Task) -> str:
     )
 
 
-def build_prompt(
-    phase: str,
-    task: Task,
-    context: list[dict],
-    verify_command: str | None,
-    frozen_requirements: dict[str, str],
-) -> str:
-    common = (
-        f"あなたは独立した{phase}担当です。説明も最終JSONも日本語で記述してください。\n"
-        f"タスク定義:\n{task_text(task)}\n開始時に固定した要件原文:\n"
-        f"{json.dumps(frozen_requirements, ensure_ascii=False, indent=2)}\n"
-        "最終応答は指定JSON Schemaに厳密に従ってください。\n"
+def build_prompt(task: Task, frozen_requirements: dict[str, str]) -> str:
+    """一度の発注で渡す指示。進め方は受注側が決める。"""
+    lines = [
+        "次の発注を完了させてください。説明も最終JSONも日本語で記述してください。",
+        "発注内容:",
+        task_text(task),
+        "開始時に固定した要件原文:",
+        json.dumps(frozen_requirements, ensure_ascii=False, indent=2),
+        "編集してよいのは edit_scope の範囲だけです。要件原文のファイルは変更できません。",
+        "acceptance_criteria を満たし、verification_commands が全て成功する状態で納品してください。",
+        "検証は納品後に発注元が同じargvで独立に実行します。作業の進め方、テストの書き方、"
+        "自己レビューの有無は受注側の裁量です。",
         "要件、受入条件、必要入力に不明点や矛盾があれば推測で補わず、statusをBLOCKEDにして"
-        "不足内容をissuesへ記録してください。\n"
-        "GUIや新しいコンソールを開かないでください。Windowsで補助プロセスを起動する場合は"
-        "CREATE_NO_WINDOWとSW_HIDE、またはStart-Process -WindowStyle Hiddenを必ず指定してください。\n"
-    )
-    if phase == "実装":
-        return common + "編集範囲内で要件と初期テストを実装してください。commitとpushは禁止です。"
-    if phase == "修正":
-        return (
-            common
-            + "次の指摘だけを修正してください。commitとpushは禁止です。\n"
-            + json.dumps(context, ensure_ascii=False)
-        )
-    if phase == "テスト":
-        return common + (
-            "製品コードとテストコードを変更せず独立に検査してください。次の固定コマンドを一度実行し、"
-            f"結果を保存してください。\n{verify_command}\n全件成功した場合だけPASSにしてください。"
-        )
-    return common + (
-        "製品コードとテストコードを変更せず要件、差分、テスト証跡を照合してください。"
-        "P0からP2は修正必須、P3は助言です。証跡: " + json.dumps(context, ensure_ascii=False)
-    )
+        "不足内容をissuesへ記録してください。",
+        "commitとpushは禁止です。GUIや新しいコンソールを開かないでください。Windowsで補助プロセスを"
+        "起動する場合はCREATE_NO_WINDOWとSW_HIDE、またはStart-Process -WindowStyle Hiddenを"
+        "必ず指定してください。",
+        "最終応答は指定JSON Schemaに厳密に従ってください。",
+    ]
+    return "\n".join(lines) + "\n"

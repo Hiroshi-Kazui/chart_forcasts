@@ -7,7 +7,19 @@ import shutil
 import tempfile
 from pathlib import Path
 
-DEFAULT_EXCLUDES = (".git", ".harness", ".venv", ".env", "data", "runs", "__pycache__")
+# 検収中にテストやlintを走らせても納品物のハッシュが変わらないよう、ツールのキャッシュも除く。
+DEFAULT_EXCLUDES = (
+    ".git",
+    ".harness",
+    ".venv",
+    ".env",
+    "data",
+    "runs",
+    "__pycache__",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".mypy_cache",
+)
 
 
 def _excluded(rel: Path, patterns: tuple[str, ...]) -> bool:
