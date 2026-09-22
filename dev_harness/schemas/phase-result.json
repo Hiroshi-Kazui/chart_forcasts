@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["status", "summary", "issues", "review_findings"],
+  "properties": {
+    "status": {"enum": ["PASS", "FAIL", "BLOCKED"]},
+    "summary": {"type": "string"},
+    "issues": {"type": "array", "items": {"type": "string"}},
+    "review_findings": {
+      "type": "array",
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["id", "severity", "description"],
+        "properties": {
+          "id": {"type": "string"},
+          "severity": {"enum": ["P0", "P1", "P2", "P3"]},
+          "description": {"type": "string"}
+        }
+      }
+    }
+  }
+}
